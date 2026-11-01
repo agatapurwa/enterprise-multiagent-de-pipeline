@@ -1,6 +1,5 @@
 # ==========================================
 # VIRTUAL ENVIRONMENTS & PYTHON CACHE
-# Keep your local machine environment out of GitHub!
 # ==========================================
 venv/
 env/
@@ -17,19 +16,25 @@ build/
 
 # ==========================================
 # SECRETS & INFRASTRUCTURE CONFIGS
-# Protect your GCP credentials and Terraform states
+# Protect GCP Service Accounts & Terraform state without blocking devcontainer.json
 # ==========================================
 .env
 *.tfstate
 *.tfstate.*
 .terraform/
 .terraform.lock.hcl
+
+# Target secret key patterns & credential folders specifically
 credentials/
-*.json
+keys/
+secrets/
+*service-account*.json
+*gcp-key*.json
+*credentials*.json
+*secret*.json
 
 # ==========================================
 # IDE & EDITOR SETTINGS
-# Don't let local workspace noise clog your commits
 # ==========================================
 .vscode/
 .idea/
@@ -40,7 +45,6 @@ Thumbs.db
 
 # ==========================================
 # LOGS & LOCAL DATA BATCHES
-# Keep massive local test batches and logs local
 # ==========================================
 logs/
 *.log
