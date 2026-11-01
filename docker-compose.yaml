@@ -39,19 +39,17 @@ services:
         condition: service_healthy
     environment:
       KESTRA_CONFIGURATION: |
+        datasources:
+          postgres:
+            url: jdbc:postgresql://postgres:5432/kestra
+            driver-class-name: org.postgresql.Driver
+            username: kestra
+            password: kestra_secret_password
         kestra:
           repository:
             type: postgres
-            postgres:
-              url: jdbc:postgresql://postgres:5432/kestra
-              username: kestra
-              password: kestra_secret_password
           queue:
             type: postgres
-            postgres:
-              url: jdbc:postgresql://postgres:5432/kestra
-              username: kestra
-              password: kestra_secret_password
           storage:
             type: local
             local:
