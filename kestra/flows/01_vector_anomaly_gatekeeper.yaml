@@ -1,0 +1,32 @@
+id: 01_vector_anomaly_gatekeeper
+namespace: enterprise.de.analytics
+description: "Pre-ingestion Gatekeeper: Evaluates incoming streaming batches for vector anomalies."
+
+inputs:
+  - id: similarity_threshold
+    type: FLOAT
+    defaults: 0.8
+    description: "Custom similarity threshold floor for anomaly detection"
+
+tasks:
+  - id: log_batch_intake
+    type: io.kestra.plugin.core.log.Log
+    message: "🚀 Initiating vector gatekeeper stream with threshold: {{ inputs.similarity_threshold }}"
+
+  - id: run_vector_anomaly_check
+    type: io.kestra.plugin.scripts.python.Commands
+    warningOnStdErr: false
+    namespaceFiles:
+      enabled: true
+    docker:
+      image: python:3.11-slim
+    env:
+      PYTHONPATH: "."
+    beforeCommands:
+      - pip install numpy polars
+    commands:
+      - python -c "import numpy as np; import polars as pl; from analytics.vector_engine import VectorEngine; engine = VectorEngine(similarity_threshold={{ inputs.similarity_threshold }}); data = pl.DataFrame({'a':[10.0, float('nan')], 'b':[20.0, 20.0]}); report = engine.detect_anomalies(data, np.array([10.0, 20.0])); print('KESTRA EVALUATION REPORT:', report)"
+
+  - id: log_completion
+    type: io.kestra.plugin.core.log.Log
+    message: "✅ Vector gatekeeper evaluation completed successfully."
