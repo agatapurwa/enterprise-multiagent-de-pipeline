@@ -1,0 +1,49 @@
+# ==========================================
+# VIRTUAL ENVIRONMENTS & PYTHON CACHE
+# Keep your local machine environment out of GitHub!
+# ==========================================
+venv/
+env/
+ENV/
+.env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# ==========================================
+# SECRETS & INFRASTRUCTURE CONFIGS
+# Protect your GCP credentials and Terraform states
+# ==========================================
+.env
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+credentials/
+*.json
+
+# ==========================================
+# IDE & EDITOR SETTINGS
+# Don't let local workspace noise clog your commits
+# ==========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ==========================================
+# LOGS & LOCAL DATA BATCHES
+# Keep massive local test batches and logs local
+# ==========================================
+logs/
+*.log
+data/
+output/
+temp/

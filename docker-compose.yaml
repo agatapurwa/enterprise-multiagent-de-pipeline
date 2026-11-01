@@ -1,0 +1,77 @@
+version: "3.8"
+
+services:
+  # =========================================================================
+  # 1. KESTRA BACKEND DATABASE (PostgreSQL)
+  # Persistent storage for Kestra workflow definitions, executions, & logs
+  # =========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: enterprise_de_postgres
+    environment:
+      POSTGRES_DB: kestra
+      POSTGRES_USER: kestra
+      POSTGRES_PASSWORD: kestra_secret_password
+    volumes:
+      - kestra_db_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kestra -d kestra"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - de_pipeline_network
+
+  # =========================================================================
+  # 2. KESTRA ORCHESTRATION ENGINE
+  # Event-driven flow runner & Web UI
+  # =========================================================================
+  kestra:
+    image: kestra/kestra:latest-full
+    container_name: enterprise_de_kestra
+    user: "0:0"
+    command: server standalone
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      KESTRA_CONFIGURATION: |
+        kestra:
+          repository:
+            type: postgres
+            postgres:
+              url: jdbc:postgresql://postgres:5432/kestra
+              username: kestra
+              password: kestra_secret_password
+          queue:
+            type: postgres
+            postgres:
+              url: jdbc:postgresql://postgres:5432/kestra
+              username: kestra
+              password: kestra_secret_password
+          storage:
+            type: local
+            local:
+              base-path: /tmp/kestra-wd
+    volumes:
+      - kestra_workdir:/tmp/kestra-wd
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./:/workspace
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    networks:
+      - de_pipeline_network
+
+volumes:
+  kestra_db_data:
+    driver: local
+  kestra_workdir:
+    driver: local
+
+networks:
+  de_pipeline_network:
+    driver: bridge
