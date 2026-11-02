@@ -3,7 +3,6 @@ import numpy as np
 import polars as pl
 from typing import Dict, Any, Union, List, Optional
 
-# Configure structured enterprise logging
 logger = logging.getLogger("enterprise_de.analytics.vector_engine")
 if not logger.handlers:
     handler = logging.StreamHandler()
@@ -16,9 +15,15 @@ if not logger.handlers:
 
 class VectorEngine:
     """
-    Enterprise Vector Engine for pre-ingestion schema drift & data quality anomaly detection.
-    Optimized for high-throughput batch processing with strict memory boundaries and magnitude checks.
+    Enterprise Vector Engine for pre-ingestion schema drift & data anomaly detection.
+    Enforces standardized feature scaling, strict schema matching, and non-destructive evaluation.
     """
+
+    SUPPORTED_NUMERIC_TYPES = (
+        pl.Int8, pl.Int16, pl.Int32, pl.Int64,
+        pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64,
+        pl.Float32, pl.Float64, pl.Decimal
+    )
 
     def __init__(
         self, 
@@ -26,61 +31,62 @@ class VectorEngine:
         magnitude_tolerance: float = 0.5, 
         sample_size: int = 5000
     ):
-        """
-        Initializes the Vector Engine.
+        if not (0.0 <= similarity_threshold <= 1.0):
+            raise ValueError("similarity_threshold must be between 0.0 and 1.0.")
+        if magnitude_tolerance < 0.0:
+            raise ValueError("magnitude_tolerance must be non-negative.")
+        if sample_size <= 0:
+            raise ValueError("sample_size must be greater than 0.")
 
-        Args:
-            similarity_threshold (float): Cosine similarity floor below which directional drift is flagged.
-            magnitude_tolerance (float): Allowed percentage deviation from centroid norm (e.g., 0.5 = ±50%).
-            sample_size (int): Maximum row limit to sample for streaming evaluation (default: 5,000).
-        """
         self.similarity_threshold = similarity_threshold
         self.magnitude_tolerance = magnitude_tolerance
         self.sample_size = sample_size
-
-    def calculate_cosine_similarity(self, v1: np.ndarray, v2: np.ndarray) -> float:
-        """Computes cosine similarity between two vectors from scratch using NumPy."""
-        if v1.size == 0 or v2.size == 0:
-            logger.error("VectorEngine: Encountered empty vector(s) during similarity calculation.")
-            raise ValueError("Input vectors cannot be empty.")
-
-        if v1.shape != v2.shape:
-            logger.error(f"VectorEngine: Dimension mismatch. v1 shape: {v1.shape}, v2 shape: {v2.shape}")
-            raise ValueError(f"Vector dimension mismatch: {v1.shape} vs {v2.shape}")
-
-        v1_clean = np.nan_to_num(v1, nan=0.0, posinf=0.0, neginf=0.0)
-        v2_clean = np.nan_to_num(v2, nan=0.0, posinf=0.0, neginf=0.0)
-
-        dot_product = np.dot(v1_clean, v2_clean)
-        norm_v1 = np.linalg.norm(v1_clean)
-        norm_v2 = np.linalg.norm(v2_clean)
-
-        if norm_v1 == 0.0 or norm_v2 == 0.0:
-            return 0.0
-
-        similarity = dot_product / (norm_v1 * norm_v2)
-        return float(np.clip(similarity, -1.0, 1.0))
 
     def detect_anomalies(
         self, 
         sample_df: Union[pl.DataFrame, pl.LazyFrame], 
         reference_centroid: np.ndarray,
-        expected_features: Optional[List[str]] = None
+        expected_features: List[str],
+        centroid_means: Optional[np.ndarray] = None,
+        centroid_stds: Optional[np.ndarray] = None
     ) -> Dict[str, Any]:
         """
-        Evaluates incoming data batch against a reference centroid with feature order enforcement,
-        magnitude-aware checks, and true Polars streaming.
+        Evaluates incoming batch vectors against a standardized reference centroid.
+
+        Args:
+            sample_df: Input Polars DataFrame or LazyFrame.
+            reference_centroid: 1D baseline vector centroid.
+            expected_features: Explicit list of feature names matching reference_centroid ordering.
+            centroid_means: Optional mean vector for Z-score feature standardization.
+            centroid_stds: Optional standard deviation vector for Z-score standardization.
         """
         try:
-            # Memory Efficiency & True Streaming: Request streaming collection
+            # 1. Validate Centroid Inputs
+            centroid = np.asarray(reference_centroid, dtype=np.float64)
+            if centroid.ndim != 1 or centroid.size == 0:
+                raise ValueError("reference_centroid must be a non-empty 1D array.")
+            if not np.isfinite(centroid).all():
+                raise ValueError("reference_centroid contains non-finite values (NaN/Inf).")
+            
+            centroid_norm = np.linalg.norm(centroid)
+            if centroid_norm == 0.0:
+                raise ValueError("reference_centroid cannot be a zero vector.")
+
+            if len(expected_features) != centroid.shape[0]:
+                raise ValueError(
+                    f"Dimension mismatch: expected_features count ({len(expected_features)}) "
+                    f"does not match centroid size ({centroid.shape[0]})."
+                )
+
+            # 2. Materialize Bounded Sample
             if isinstance(sample_df, pl.LazyFrame):
-                eval_df = sample_df.head(self.sample_size).collect(streaming=True)
+                eval_df = sample_df.head(self.sample_size).collect()
             else:
                 eval_df = sample_df.head(self.sample_size)
 
             row_count = eval_df.height
             if row_count == 0:
-                logger.warning("VectorEngine: Received empty DataFrame batch for anomaly detection.")
+                logger.warning("VectorEngine: Received empty batch.")
                 return {
                     "status": "WARNING",
                     "message": "Empty batch received",
@@ -89,78 +95,74 @@ class VectorEngine:
                     "anomaly_indices": []
                 }
 
-            # Extract numeric columns dynamically
-            numeric_cols = [
-                name for name, dtype in zip(eval_df.columns, eval_df.dtypes)
-                if dtype in (pl.Int8, pl.Int16, pl.Int32, pl.Int64, pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64, pl.Float32, pl.Float64)
-            ]
+            # 3. Schema Verification & Exact Ordering Alignment
+            missing_cols = [col for col in expected_features if col not in eval_df.columns]
+            if missing_cols:
+                raise ValueError(f"Schema drift: Missing expected numeric columns: {missing_cols}")
 
-            if not numeric_cols:
-                logger.error("VectorEngine: No numerical features found in dataframe columns.")
-                raise ValueError("DataFrame contains no numerical features for vector comparison.")
+            # Verify target dtypes
+            for col in expected_features:
+                dtype = eval_df.schema[col]
+                if dtype not in self.SUPPORTED_NUMERIC_TYPES:
+                    raise TypeError(f"Column '{col}' has non-numeric dtype '{dtype}'")
 
-            # Guardrail: Enforce exact feature order match if expected feature names are provided
-            if expected_features is not None:
-                if numeric_cols != expected_features:
-                    logger.error("VectorEngine: Feature schema order mismatch detected!")
-                    raise ValueError(
-                        f"Schema drift / feature order mismatch. "
-                        f"Expected order: {expected_features}, Received order: {numeric_cols}"
-                    )
+            # Reorder columns explicitly to match expected_features alignment
+            ordered_df = eval_df.select(expected_features)
+            raw_matrix = ordered_df.to_numpy().astype(np.float64)
 
-            # Extract raw array and track rows with non-finite values (NaN / Inf)
-            raw_matrix = eval_df.select(numeric_cols).to_numpy()
+            # 4. Separate Non-Finite Rows Prior to Matrix Operations
             has_non_finite = ~np.isfinite(raw_matrix).all(axis=1)
+            valid_mask = ~has_non_finite
 
-            # Sanitize matrix for math computations
-            data_matrix = np.nan_to_num(raw_matrix, nan=0.0, posinf=0.0, neginf=0.0)
+            # Pre-allocate output arrays
+            similarities = np.full(row_count, -1.0, dtype=np.float64)
+            norm_ratios = np.full(row_count, np.inf, dtype=np.float64)
 
-            # Guardrail: Check feature dimension parity
-            if data_matrix.shape[1] != reference_centroid.shape[0]:
-                logger.error(
-                    f"VectorEngine: Feature dimension mismatch. "
-                    f"Data features ({data_matrix.shape[1]}) != Centroid features ({reference_centroid.shape[0]})."
-                )
-                raise ValueError(
-                    f"Feature dimension mismatch: dataframe has {data_matrix.shape[1]} features, "
-                    f"but reference centroid expects {reference_centroid.shape[0]}."
-                )
+            if np.any(valid_mask):
+                valid_matrix = raw_matrix[valid_mask]
 
-            # Vectorized Matrix-to-Centroid Calculations
-            dot_products = np.dot(data_matrix, reference_centroid)
-            matrix_norms = np.linalg.norm(data_matrix, axis=1)
-            centroid_norm = np.linalg.norm(reference_centroid)
+                # 5. Apply Z-Score Feature Standardization (if provided)
+                if centroid_means is not None and centroid_stds is not None:
+                    means = np.asarray(centroid_means, dtype=np.float64)
+                    stds = np.asarray(centroid_stds, dtype=np.float64)
+                    stds[stds == 0.0] = 1e-10  # Prevent zero-variance division
+                    valid_matrix = (valid_matrix - means) / stds
 
-            denominators = matrix_norms * centroid_norm
-            denominators[denominators == 0.0] = 1e-10
+                # 6. Vectorized Linear Algebra Evaluations
+                dot_products = np.dot(valid_matrix, centroid)
+                matrix_norms = np.linalg.norm(valid_matrix, axis=1)
 
-            similarities = dot_products / denominators
-            similarities = np.clip(similarities, -1.0, 1.0)
+                denominators = matrix_norms * centroid_norm
+                zero_norm_mask = denominators == 0.0
+                denominators[zero_norm_mask] = 1e-10
 
-            # Guardrail: Magnitude Check (Catches rows scaled far from baseline magnitude despite good direction)
-            centroid_norm_safe = centroid_norm if centroid_norm != 0.0 else 1e-10
-            norm_ratios = np.abs(matrix_norms - centroid_norm_safe) / centroid_norm_safe
-            magnitude_anomaly_mask = norm_ratios > self.magnitude_tolerance
+                calc_sims = dot_products / denominators
+                calc_sims[zero_norm_mask] = 0.0
+                similarities[valid_mask] = np.clip(calc_sims, -1.0, 1.0)
 
-            # Combine anomaly criteria: Directional drop OR Magnitude spike OR Data Corruption (NaN/Inf)
-            similarity_anomaly_mask = similarities < self.similarity_threshold
-            final_anomaly_mask = similarity_anomaly_mask | magnitude_anomaly_mask | has_non_finite
-            
+                # Magnitude ratio deviation calculation
+                norm_ratios[valid_mask] = np.abs(matrix_norms - centroid_norm) / centroid_norm
+
+            # 7. Evaluate Flag Thresholds
+            similarity_anomalies = similarities < self.similarity_threshold
+            magnitude_anomalies = norm_ratios > self.magnitude_tolerance
+            final_anomaly_mask = similarity_anomalies | magnitude_anomalies | has_non_finite
+
             anomaly_indices = np.where(final_anomaly_mask)[0].tolist()
 
             logger.info(
-                f"VectorEngine evaluation complete. Rows evaluated: {row_count}, "
-                f"Anomalies detected: {len(anomaly_indices)}"
+                f"VectorEngine complete. Evaluated: {row_count}, Anomalies: {len(anomaly_indices)}"
             )
 
             return {
                 "status": "SUCCESS",
                 "total_evaluated": row_count,
-                "features_analyzed": len(numeric_cols),
+                "features_analyzed": len(expected_features),
                 "anomaly_count": len(anomaly_indices),
                 "anomaly_indices": anomaly_indices,
                 "similarity_scores": similarities.tolist(),
                 "norm_deviations": norm_ratios.tolist(),
+                "non_finite_count": int(np.sum(has_non_finite)),
                 "threshold_applied": self.similarity_threshold
             }
 
