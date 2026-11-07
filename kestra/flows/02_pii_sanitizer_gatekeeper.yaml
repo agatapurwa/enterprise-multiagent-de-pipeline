@@ -1,0 +1,55 @@
+id: 02_pii_sanitizer_gatekeeper
+namespace: enterprise.de.analytics
+description: "Pre-LLM Sanitizer Gatekeeper: Scans and masks PII fields using SHA-256 before prompt payload generation."
+
+inputs:
+  - id: pii_salt_secret
+    type: STRING
+    defaults: "kestra_production_secret_salt_2026"
+    description: "Salt string for SHA-256 masking layer to prevent rainbow table attacks."
+
+tasks:
+  - id: log_sanitizer_intake
+    type: io.kestra.plugin.core.log.Log
+    message: "🚀 Initiating PII Sanitizer evaluation stream..."
+
+  - id: run_pii_sanitization_check
+    type: io.kestra.plugin.scripts.python.Commands
+    warningOnStdErr: false
+    namespaceFiles:
+      enabled: true
+    docker:
+      image: python:3.11-slim
+    env:
+      PYTHONPATH: "."
+      PII_SANITIZER_SALT: "{{ inputs.pii_salt_secret }}"
+    beforeCommands:
+      - pip install polars
+    commands:
+      - |
+        python -c "
+        import polars as pl
+        from analytics.sanitizer import PIISanitizer
+
+        raw_stream = pl.DataFrame({
+            'customer_id': [9001, 9002],
+            'email': ['alice@enterprise.com', 'bob@enterprise.com'],
+            'support_ticket': ['Issue reported by dev@enterprise.com', 'No PII here'],
+            'metric_value': [42.0, 108.5]
+        })
+
+        sanitizer = PIISanitizer()
+        clean_df, metadata = sanitizer.sanitize_dataframe(
+            df=raw_stream,
+            explicit_pii_cols=['customer_id'],
+            sample_value_scan=True
+        )
+
+        print('KESTRA SANITIZATION SUCCESS:')
+        print('Masked Columns Detected:', metadata['pii_columns_masked'])
+        print('Safe Schema Head:', metadata['sample_head'])
+        "
+
+  - id: log_sanitizer_completion
+    type: io.kestra.plugin.core.log.Log
+    message: "✅ PII Sanitizer evaluation completed successfully. Safe payload ready for LLM agent."
