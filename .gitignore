@@ -22,7 +22,6 @@ build/
 *.tfstate
 *.tfstate.*
 .terraform/
-.terraform.lock.hcl
 
 # Target secret key patterns & credential folders specifically
 credentials/
